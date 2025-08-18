@@ -6,8 +6,13 @@
 (define-constant ERR_ALREADY_EXISTS (err u102))
 (define-constant ERR_INVALID_DATA (err u103))
 (define-constant ERR_NOT_OWNER (err u104))
+(define-constant ERR_VACCINE_NOT_FOUND (err u105))
+(define-constant ERR_ALREADY_VACCINATED (err u106))
+(define-constant ERR_INVALID_VACCINE (err u107))
+(define-constant ERR_EXPIRED_VACCINE (err u108))
 
 (define-data-var last-animal-id uint u0)
+(define-data-var last-vaccine-id uint u0)
 (define-data-var contract-uri (optional (string-ascii 256)) none)
 
 (define-map animals
@@ -44,6 +49,51 @@
 
 (define-map authorized-registrars principal bool)
 
+(define-map vaccines
+  uint
+  {
+    name: (string-ascii 64),
+    manufacturer: (string-ascii 64),
+    disease-protection: (string-ascii 128),
+    dosage-ml: uint,
+    shelf-life-months: uint,
+    minimum-age-days: uint,
+    booster-interval-days: (optional uint),
+    species-compatibility: (string-ascii 64),
+    created-at: uint,
+    created-by: principal,
+    is-active: bool
+  }
+)
+
+(define-map animal-vaccinations
+  {animal-id: uint, vaccine-id: uint}
+  {
+    administered-at: uint,
+    administered-by: principal,
+    batch-number: (string-ascii 32),
+    expiry-date: uint,
+    veterinarian: (optional principal),
+    location: (optional (string-ascii 128)),
+    next-due-date: (optional uint),
+    adverse-reaction: (optional (string-ascii 256)),
+    is-valid: bool
+  }
+)
+
+(define-map vaccination-schedules
+  uint
+  {
+    primary-doses: uint,
+    booster-frequency-days: uint,
+    lifetime-doses: uint,
+    seasonal-required: bool,
+    age-restrictions: (string-ascii 64)
+  }
+)
+
+(define-map authorized-veterinarians principal bool)
+
 (define-read-only (get-last-animal-id)
   (var-get last-animal-id)
 )
@@ -72,6 +122,26 @@
   (default-to false (map-get? authorized-registrars registrar))
 )
 
+(define-read-only (get-last-vaccine-id)
+  (var-get last-vaccine-id)
+)
+
+(define-read-only (get-vaccine (vaccine-id uint))
+  (map-get? vaccines vaccine-id)
+)
+
+(define-read-only (get-animal-vaccination (animal-id uint) (vaccine-id uint))
+  (map-get? animal-vaccinations {animal-id: animal-id, vaccine-id: vaccine-id})
+)
+
+(define-read-only (get-vaccination-schedule (vaccine-id uint))
+  (map-get? vaccination-schedules vaccine-id)
+)
+
+(define-read-only (is-authorized-veterinarian (vet principal))
+  (default-to false (map-get? authorized-veterinarians vet))
+)
+
 (define-public (set-contract-uri (uri (string-ascii 256)))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
@@ -90,6 +160,190 @@
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
     (ok (map-delete authorized-registrars registrar))
+  )
+)
+
+(define-public (authorize-veterinarian (vet principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (ok (map-set authorized-veterinarians vet true))
+  )
+)
+
+(define-public (revoke-veterinarian (vet principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (ok (map-delete authorized-veterinarians vet))
+  )
+)
+
+(define-public (register-vaccine
+  (name (string-ascii 64))
+  (manufacturer (string-ascii 64))
+  (disease-protection (string-ascii 128))
+  (dosage-ml uint)
+  (shelf-life-months uint)
+  (minimum-age-days uint)
+  (booster-interval-days (optional uint))
+  (species-compatibility (string-ascii 64))
+)
+  (let
+    (
+      (vaccine-id (+ (var-get last-vaccine-id) u1))
+      (current-block stacks-block-height)
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (> (len name) u0) ERR_INVALID_DATA)
+    (asserts! (> (len manufacturer) u0) ERR_INVALID_DATA)
+    (asserts! (> dosage-ml u0) ERR_INVALID_DATA)
+    (asserts! (> shelf-life-months u0) ERR_INVALID_DATA)
+    
+    (map-set vaccines vaccine-id
+      {
+        name: name,
+        manufacturer: manufacturer,
+        disease-protection: disease-protection,
+        dosage-ml: dosage-ml,
+        shelf-life-months: shelf-life-months,
+        minimum-age-days: minimum-age-days,
+        booster-interval-days: booster-interval-days,
+        species-compatibility: species-compatibility,
+        created-at: current-block,
+        created-by: tx-sender,
+        is-active: true
+      }
+    )
+    
+    (var-set last-vaccine-id vaccine-id)
+    (ok vaccine-id)
+  )
+)
+
+(define-public (set-vaccination-schedule
+  (vaccine-id uint)
+  (primary-doses uint)
+  (booster-frequency-days uint)
+  (lifetime-doses uint)
+  (seasonal-required bool)
+  (age-restrictions (string-ascii 64))
+)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (is-some (map-get? vaccines vaccine-id)) ERR_VACCINE_NOT_FOUND)
+    (asserts! (> primary-doses u0) ERR_INVALID_DATA)
+    
+    (map-set vaccination-schedules vaccine-id
+      {
+        primary-doses: primary-doses,
+        booster-frequency-days: booster-frequency-days,
+        lifetime-doses: lifetime-doses,
+        seasonal-required: seasonal-required,
+        age-restrictions: age-restrictions
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (administer-vaccination
+  (animal-id uint)
+  (vaccine-id uint)
+  (batch-number (string-ascii 32))
+  (expiry-date uint)
+  (veterinarian (optional principal))
+  (location (optional (string-ascii 128)))
+)
+  (let
+    (
+      (current-block stacks-block-height)
+      (vaccine-data (unwrap! (map-get? vaccines vaccine-id) ERR_VACCINE_NOT_FOUND))
+      (animal-data (unwrap! (map-get? animals animal-id) ERR_NOT_FOUND))
+      (existing-vaccination (map-get? animal-vaccinations {animal-id: animal-id, vaccine-id: vaccine-id}))
+      (next-due (match (get booster-interval-days vaccine-data)
+        interval (some (+ current-block interval))
+        none
+      ))
+    )
+    (asserts! (is-some (map-get? animals animal-id)) ERR_NOT_FOUND)
+    (asserts! (get is-active vaccine-data) ERR_INVALID_VACCINE)
+    (asserts! (> expiry-date current-block) ERR_EXPIRED_VACCINE)
+    (asserts! (or 
+      (is-eq tx-sender CONTRACT_OWNER)
+      (is-authorized-registrar tx-sender)
+      (is-authorized-veterinarian tx-sender)
+      (is-eq (some tx-sender) (nft-get-owner? herdtag animal-id))
+    ) ERR_NOT_AUTHORIZED)
+    
+    (asserts! (is-none existing-vaccination) ERR_ALREADY_VACCINATED)
+    
+    (map-set animal-vaccinations 
+      {animal-id: animal-id, vaccine-id: vaccine-id}
+      {
+        administered-at: current-block,
+        administered-by: tx-sender,
+        batch-number: batch-number,
+        expiry-date: expiry-date,
+        veterinarian: veterinarian,
+        location: location,
+        next-due-date: next-due,
+        adverse-reaction: none,
+        is-valid: true
+      }
+    )
+    
+    (try! (add-animal-event animal-id "VACCINATION" 
+      (unwrap-panic (as-max-len? (concat "Vaccinated with " (get name vaccine-data)) u256))
+      location none none))
+    (ok true)
+  )
+)
+
+(define-public (record-adverse-reaction
+  (animal-id uint)
+  (vaccine-id uint)
+  (reaction-description (string-ascii 256))
+)
+  (let
+    (
+      (vaccination-data (unwrap! (map-get? animal-vaccinations {animal-id: animal-id, vaccine-id: vaccine-id}) ERR_NOT_FOUND))
+    )
+    (asserts! (or 
+      (is-eq tx-sender CONTRACT_OWNER)
+      (is-authorized-veterinarian tx-sender)
+      (is-eq (some tx-sender) (nft-get-owner? herdtag animal-id))
+    ) ERR_NOT_AUTHORIZED)
+    
+    (map-set animal-vaccinations 
+      {animal-id: animal-id, vaccine-id: vaccine-id}
+      (merge vaccination-data {adverse-reaction: (some reaction-description)})
+    )
+    
+    (try! (add-animal-event animal-id "ADVERSE_REACTION" reaction-description none none none))
+    (ok true)
+  )
+)
+
+(define-public (invalidate-vaccination
+  (animal-id uint)
+  (vaccine-id uint)
+  (reason (string-ascii 256))
+)
+  (let
+    (
+      (vaccination-data (unwrap! (map-get? animal-vaccinations {animal-id: animal-id, vaccine-id: vaccine-id}) ERR_NOT_FOUND))
+    )
+    (asserts! (or 
+      (is-eq tx-sender CONTRACT_OWNER)
+      (is-authorized-veterinarian tx-sender)
+    ) ERR_NOT_AUTHORIZED)
+    
+    (map-set animal-vaccinations 
+      {animal-id: animal-id, vaccine-id: vaccine-id}
+      (merge vaccination-data {is-valid: false})
+    )
+    
+    (try! (add-animal-event animal-id "VACCINATION_INVALID" reason none none none))
+    (ok true)
   )
 )
 
@@ -266,3 +520,5 @@
     })
   )
 )
+
+
