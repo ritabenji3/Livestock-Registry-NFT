@@ -9,6 +9,16 @@ requirements = []
 path = 'contracts/Herdtag.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.feed-management]
+path = 'contracts/feed-management.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.breeding-genetics]
+path = 'contracts/breeding-genetics.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
